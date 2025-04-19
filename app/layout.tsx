@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import { Toaster } from "sonner";
 
 import ReactQueryProvider from "@/lib/query-client";
 import { Navbar } from "@/components/navbar";
+import { ToasterProvider } from "@/components/toaster-provider";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Auth Starter Kit",
+  title: "AuthPro",
   description: "A full-stack starter kit with authentication",
 };
 
@@ -26,7 +26,7 @@ export default function RootLayout({
             <Navbar />
             <div className="pt-16">{children}</div>
           </main>
-          <Toaster position="top-right" />
+          <ToasterProvider />
         </ReactQueryProvider>
       </body>
     </html>

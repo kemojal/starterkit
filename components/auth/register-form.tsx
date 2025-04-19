@@ -1,13 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
-import axios from "axios";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -57,6 +56,13 @@ export function RegisterForm() {
   const [error, setError] = useState<string | null>(null);
   const { login } = useAuthStore();
 
+  // Handle form error with useEffect
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+    }
+  }, [error]);
+
   const form = useForm<RegisterFormValues>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
@@ -74,15 +80,12 @@ export function RegisterForm() {
 
     try {
       // Register the user
-      await axios.post(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/users/`,
-        {
-          email: data.email,
-          password: data.password,
-          first_name: data.firstName,
-          last_name: data.lastName,
-        }
-      );
+      await api.register({
+        email: data.email,
+        password: data.password,
+        first_name: data.firstName,
+        last_name: data.lastName,
+      });
 
       // Log in with the new credentials
       await login(data.email, data.password);
@@ -90,9 +93,22 @@ export function RegisterForm() {
       toast.success("Registration successful!");
       router.push("/dashboard");
     } catch (err: any) {
-      const errorMessage = err.response?.data?.detail || "Registration failed";
+      // Handle different error formats from API
+      let errorMessage = "Registration failed";
+
+      if (err.response) {
+        if (typeof err.response.data === "string") {
+          errorMessage = err.response.data;
+        } else if (err.response.data?.detail) {
+          errorMessage = err.response.data.detail;
+        } else if (err.response.data?.message) {
+          errorMessage = err.response.data.message;
+        }
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
+
       setError(errorMessage);
-      toast.error(errorMessage);
     } finally {
       setIsLoading(false);
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useForm } from "react-hook-form";
@@ -52,13 +52,68 @@ export function LoginForm() {
     },
   });
 
+  // Handle store errors with useEffect
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+      clearError();
+    }
+  }, [error, clearError]);
+
   async function onSubmit(data: LoginFormValues) {
     try {
+      // Clear any existing errors
+      form.clearErrors();
+
+      console.log("Attempting login with:", { email: data.email });
       await login(data.email, data.password);
+
+      // Check auth state after login
+      console.log("Login successful, checking authentication state...");
+
+      // If we get here, login was successful
       toast.success("Login successful!");
-      router.push("/dashboard");
-    } catch (error) {
-      // Error is handled by the store
+
+      // Small delay before redirect to ensure state is updated
+      setTimeout(() => {
+        router.push("/dashboard");
+      }, 500);
+    } catch (err: any) {
+      // Error is already handled by the store through useEffect
+      console.error("Login error:", err);
+
+      // If we have validation errors, display them in the form
+      if (err.response?.status === 422 && err.response?.data?.detail) {
+        const validationErrors = err.response.data.detail;
+
+        // Check if the error is about missing fields
+        if (Array.isArray(validationErrors)) {
+          validationErrors.forEach((error) => {
+            const fieldName = error.loc[1];
+            if (fieldName === "username" || fieldName === "email") {
+              form.setError("email", {
+                type: "manual",
+                message: error.msg,
+              });
+            } else if (fieldName === "password") {
+              form.setError("password", {
+                type: "manual",
+                message: error.msg,
+              });
+            }
+          });
+        }
+      } else if (err.response?.status === 401) {
+        // Special handling for unauthorized
+        form.setError("email", {
+          type: "manual",
+          message: "Invalid email or password",
+        });
+        form.setError("password", {
+          type: "manual",
+          message: "Invalid email or password",
+        });
+      }
     }
   }
 
@@ -69,12 +124,6 @@ export function LoginForm() {
     } catch (error) {
       // Error is handled by the store
     }
-  }
-
-  // Show error toast if there's an error in the store
-  if (error) {
-    toast.error(error);
-    clearError();
   }
 
   return (

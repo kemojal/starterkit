@@ -23,6 +23,41 @@ interface AuthState {
   clearError: () => void;
 }
 
+// Helper function to extract error message from various error formats
+const extractErrorMessage = (error: unknown): string => {
+  if (typeof error === "string") return error;
+
+  const anyError = error as any;
+
+  if (anyError.response) {
+    // Handle validation errors (422)
+    if (anyError.response.status === 422 && anyError.response.data?.detail) {
+      if (Array.isArray(anyError.response.data.detail)) {
+        // Get a readable message from validation errors
+        return anyError.response.data.detail
+          .map((err: any) => `${err.msg} for ${err.loc[1]}`)
+          .join(", ");
+      }
+    }
+
+    if (typeof anyError.response.data === "string") {
+      return anyError.response.data;
+    } else if (anyError.response.data?.detail) {
+      if (typeof anyError.response.data.detail === "string") {
+        return anyError.response.data.detail;
+      } else {
+        return JSON.stringify(anyError.response.data.detail);
+      }
+    } else if (anyError.response.data?.message) {
+      return anyError.response.data.message;
+    }
+  }
+
+  if (anyError.message) return anyError.message;
+
+  return "An unknown error occurred";
+};
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
@@ -34,18 +69,72 @@ export const useAuthStore = create<AuthState>()(
       login: async (email: string, password: string) => {
         try {
           set({ isLoading: true, error: null });
-          await api.login(email, password);
-          const { data: userData } = await api.getCurrentUser();
-          set({
-            user: userData,
-            isAuthenticated: true,
-            isLoading: false,
+
+          // First step: Login to get the token
+          const loginResponse = await api.login(email, password);
+          console.log("Login successful, response:", {
+            status: loginResponse.status,
+            data: loginResponse.data ? "Present" : "Missing",
+            cookies: document.cookie
+              ? document.cookie.substring(0, 40) + "..."
+              : "None",
           });
-        } catch (error: any) {
+
+          // Add a small delay to ensure cookies are properly set
+          await new Promise((resolve) => setTimeout(resolve, 500));
+
+          // Check cookie state after login
+          console.log(
+            "Cookies after login delay:",
+            document.cookie ? document.cookie.substring(0, 40) + "..." : "None"
+          );
+
+          try {
+            // Second step: Get user data with the token
+            const { data: userData } = await api.getCurrentUser();
+            console.log("User data fetched successfully:", userData?.email);
+
+            set({
+              user: userData,
+              isAuthenticated: true,
+              isLoading: false,
+            });
+          } catch (userError) {
+            console.error("Error fetching user data:", userError);
+
+            // If we can't get user data, still consider login successful but with limited data
+            if (loginResponse?.data?.user_id) {
+              const partialUserData: User = {
+                id: loginResponse.data.user_id,
+                email: loginResponse.data.email || email,
+                is_verified: false,
+                roles: [],
+              };
+
+              console.log(
+                "Using partial user data from login response:",
+                partialUserData
+              );
+
+              set({
+                user: partialUserData,
+                isAuthenticated: true,
+                isLoading: false,
+              });
+            } else {
+              throw userError; // Re-throw if we can't even get minimal user data
+            }
+          }
+        } catch (loginError) {
+          console.error("Login process failed:", loginError);
           set({
-            error: error.response?.data?.detail || "Login failed",
+            error: extractErrorMessage(loginError),
             isLoading: false,
+            user: null,
+            isAuthenticated: false,
           });
+          // Re-throw the error so the component can catch it
+          throw loginError;
         }
       },
 
@@ -59,9 +148,11 @@ export const useAuthStore = create<AuthState>()(
           }
         } catch (error: any) {
           set({
-            error: error.response?.data?.detail || "Google login failed",
+            error: extractErrorMessage(error),
             isLoading: false,
           });
+          // Re-throw the error so the component can catch it
+          throw error;
         }
       },
 
@@ -76,37 +167,162 @@ export const useAuthStore = create<AuthState>()(
           });
         } catch (error: any) {
           set({
-            error: error.response?.data?.detail || "Logout failed",
+            error: extractErrorMessage(error),
             isLoading: false,
           });
+          // Re-throw the error so the component can catch it
+          throw error;
         }
       },
 
       fetchUser: async () => {
+        const currentState = get();
+
+        // Don't fetch if already loading
+        if (currentState.isLoading) {
+          console.log("Skipping fetchUser - already loading", {
+            isLoading: currentState.isLoading,
+          });
+          return;
+        }
+
+        // Check for stored last failure time to prevent excessive retries
+        const lastFailureTime = localStorage.getItem("auth_last_failure_time");
+        const currentTime = Date.now();
+        const MIN_RETRY_INTERVAL = 10000; // 10 seconds between retry attempts
+
+        if (
+          lastFailureTime &&
+          currentTime - parseInt(lastFailureTime) < MIN_RETRY_INTERVAL
+        ) {
+          console.log("Skipping fetchUser - too soon after last failure");
+          throw new Error("Too many auth attempts in short time");
+        }
+
         try {
           set({ isLoading: true });
-          const { data: userData } = await api.getCurrentUser();
-          set({
-            user: userData,
-            isAuthenticated: true,
-            isLoading: false,
-          });
+          console.log(
+            "Fetching current user, cookies:",
+            document.cookie ? document.cookie.substring(0, 40) + "..." : "None"
+          );
+
+          try {
+            // First attempt: directly get user data
+            const { data: userData } = await api.getCurrentUser();
+            console.log("User data fetched successfully:", userData?.email);
+
+            // Clear any stored error markers on success
+            localStorage.removeItem("auth_last_failure_time");
+            localStorage.removeItem("auth_failure_count");
+
+            set({
+              user: userData,
+              isAuthenticated: true,
+              isLoading: false,
+            });
+            return;
+          } catch (initialError) {
+            console.error("Initial user fetch failed:", initialError);
+
+            // Increment failure counter
+            const failureCount = parseInt(
+              localStorage.getItem("auth_failure_count") || "0"
+            );
+            localStorage.setItem(
+              "auth_failure_count",
+              (failureCount + 1).toString()
+            );
+            localStorage.setItem(
+              "auth_last_failure_time",
+              currentTime.toString()
+            );
+
+            // If too many failures, reset auth state to prevent loop
+            if (failureCount >= 3) {
+              console.error("Too many auth failures, resetting state");
+              set({
+                user: null,
+                isAuthenticated: false,
+                isLoading: false,
+              });
+              throw initialError;
+            }
+
+            // Attempt token refresh if we have any auth artifacts
+            if (
+              document.cookie.includes("access_token") ||
+              document.cookie.includes("refresh_token") ||
+              document.cookie.includes("token_debug") ||
+              localStorage.getItem("access_token")
+            ) {
+              try {
+                console.log("Attempting to refresh token");
+                await api.refreshToken();
+                console.log("Token refreshed, trying to fetch user again");
+
+                // Try again after refresh
+                const { data: userData } = await api.getCurrentUser();
+                console.log(
+                  "User data fetched successfully after token refresh:",
+                  userData?.email
+                );
+
+                // Clear failure markers on success
+                localStorage.removeItem("auth_last_failure_time");
+                localStorage.removeItem("auth_failure_count");
+
+                set({
+                  user: userData,
+                  isAuthenticated: true,
+                  isLoading: false,
+                });
+                return;
+              } catch (refreshError) {
+                console.error("Token refresh failed:", refreshError);
+                // Record this failure too
+                localStorage.setItem(
+                  "auth_last_failure_time",
+                  Date.now().toString()
+                );
+              }
+            } else {
+              console.log(
+                "No authentication tokens found, not attempting refresh"
+              );
+            }
+
+            // If all attempts failed
+            set({
+              user: null,
+              isAuthenticated: false,
+              isLoading: false,
+            });
+            throw initialError;
+          }
         } catch (error) {
+          console.error("All fetchUser attempts failed:", error);
           set({
             user: null,
             isAuthenticated: false,
             isLoading: false,
           });
+          throw error;
         }
       },
 
-      clearError: () => set({ error: null }),
+      clearError: () => {
+        set((state) => {
+          if (state.error === null) return state;
+          return { ...state, error: null };
+        });
+      },
     }),
     {
       name: "auth-storage",
       // Only persist non-sensitive data
       partialize: (state) => ({
         isAuthenticated: state.isAuthenticated,
+        user: state.user,
       }),
     }
   )
