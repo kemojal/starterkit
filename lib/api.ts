@@ -18,6 +18,7 @@ const apiClient = axios.create({
     "Content-Type": "application/json",
   },
   withCredentials: true, // This allows cookies to be sent with requests
+  timeout: 8000, // Add a global 8-second timeout to prevent hanging requests
 });
 
 // Check for token in cookies and add it to requests
@@ -211,20 +212,68 @@ apiClient.interceptors.response.use(
   }
 );
 
-// API methods
+// Add function to check if server is running
+const checkServerConnection = async (): Promise<boolean> => {
+  try {
+    // Try to reach the server's health check endpoint or just the root
+    // Note: Using a controller with timeout since fetch doesn't support timeout directly
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+    const response = await fetch(`${API_URL}/health`, {
+      method: "GET",
+      mode: "no-cors",
+      cache: "no-cache",
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return response.ok || response.status === 0; // status 0 can happen with no-cors
+  } catch (error) {
+    console.error("Server connection check failed:", error);
+    return false;
+  }
+};
+
+// Modify the API methods
 const api = {
+  // Server check
+  checkConnection: checkServerConnection,
+
   // Auth
   login: (email: string, password: string) => {
-    const formData = new URLSearchParams({
-      username: email,
-      password: password,
-    });
-    return apiClient.post("/token", formData, {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+    // Check server before attempting login
+    return new Promise(async (resolve, reject) => {
+      try {
+        const serverOnline = await checkServerConnection();
+        if (!serverOnline) {
+          console.error("Server connection check failed before login attempt");
+          reject(new Error("Cannot connect to server at " + API_URL));
+          return;
+        }
+
+        const formData = new URLSearchParams({
+          username: email,
+          password: password,
+        });
+
+        const response = await apiClient.post("/token", formData, {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        });
+
+        resolve(response);
+      } catch (error) {
+        reject(error);
+      }
     });
   },
+
+  // ... keep the rest of the existing API methods
   loginWithGoogle: () => apiClient.get("/login/google"),
   logout: () => apiClient.post("/logout"),
   refreshToken: () => performTokenRefresh(),

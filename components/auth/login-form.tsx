@@ -65,8 +65,21 @@ export function LoginForm() {
       // Clear any existing errors
       form.clearErrors();
 
-      console.log("Attempting login with:", { email: data.email });
+      console.log("Form submitted. Attempting login with:", {
+        email: data.email,
+      });
+
+      // Add specific timeout notification
+      const loginTimeoutWarning = setTimeout(() => {
+        toast.loading(
+          "Login attempt is taking longer than expected. Please wait..."
+        );
+      }, 3000);
+
       await login(data.email, data.password);
+
+      // Clear timeout if login succeeds
+      clearTimeout(loginTimeoutWarning);
 
       // Check auth state after login
       console.log("Login successful, checking authentication state...");
@@ -78,13 +91,34 @@ export function LoginForm() {
       setTimeout(() => {
         router.push("/dashboard");
       }, 500);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Error is already handled by the store through useEffect
       console.error("Login error:", err);
 
+      // Display more specific network errors
+      if (err instanceof Error) {
+        if (err.message.includes("timeout")) {
+          toast.error(
+            "Login request timed out. Please check your internet connection and verify the backend server is running."
+          );
+        } else if (err.message.includes("Network Error")) {
+          toast.error(
+            "Network error. Please check if the backend server is running at http://localhost:8000"
+          );
+        } else if (err.message.includes("No access token")) {
+          toast.error(
+            "Login succeeded but no access token was received. Please check your backend configuration."
+          );
+        }
+      }
+
       // If we have validation errors, display them in the form
-      if (err.response?.status === 422 && err.response?.data?.detail) {
-        const validationErrors = err.response.data.detail;
+      const anyError = err as any;
+      if (
+        anyError?.response?.status === 422 &&
+        anyError?.response?.data?.detail
+      ) {
+        const validationErrors = anyError.response.data.detail;
 
         // Check if the error is about missing fields
         if (Array.isArray(validationErrors)) {
@@ -103,7 +137,7 @@ export function LoginForm() {
             }
           });
         }
-      } else if (err.response?.status === 401) {
+      } else if (anyError?.response?.status === 401) {
         // Special handling for unauthorized
         form.setError("email", {
           type: "manual",

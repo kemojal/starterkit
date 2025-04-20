@@ -27,33 +27,46 @@ interface AuthState {
 const extractErrorMessage = (error: unknown): string => {
   if (typeof error === "string") return error;
 
-  const anyError = error as any;
+  // Define a type for common error shapes
+  interface ErrorWithResponse {
+    response?: {
+      status?: number;
+      data?: {
+        detail?: string | Array<{ msg: string; loc: string[] }>;
+        message?: string;
+      };
+      statusText?: string;
+    };
+    message?: string;
+  }
 
-  if (anyError.response) {
+  const errorObj = error as ErrorWithResponse;
+
+  if (errorObj.response) {
     // Handle validation errors (422)
-    if (anyError.response.status === 422 && anyError.response.data?.detail) {
-      if (Array.isArray(anyError.response.data.detail)) {
+    if (errorObj.response.status === 422 && errorObj.response.data?.detail) {
+      if (Array.isArray(errorObj.response.data.detail)) {
         // Get a readable message from validation errors
-        return anyError.response.data.detail
-          .map((err: any) => `${err.msg} for ${err.loc[1]}`)
+        return errorObj.response.data.detail
+          .map((err) => `${err.msg} for ${err.loc[1]}`)
           .join(", ");
       }
     }
 
-    if (typeof anyError.response.data === "string") {
-      return anyError.response.data;
-    } else if (anyError.response.data?.detail) {
-      if (typeof anyError.response.data.detail === "string") {
-        return anyError.response.data.detail;
+    if (typeof errorObj.response.data === "string") {
+      return errorObj.response.data;
+    } else if (errorObj.response.data?.detail) {
+      if (typeof errorObj.response.data.detail === "string") {
+        return errorObj.response.data.detail;
       } else {
-        return JSON.stringify(anyError.response.data.detail);
+        return JSON.stringify(errorObj.response.data.detail);
       }
-    } else if (anyError.response.data?.message) {
-      return anyError.response.data.message;
+    } else if (errorObj.response.data?.message) {
+      return errorObj.response.data.message;
     }
   }
 
-  if (anyError.message) return anyError.message;
+  if (errorObj.message) return errorObj.message;
 
   return "An unknown error occurred";
 };
@@ -67,30 +80,75 @@ export const useAuthStore = create<AuthState>()(
       error: null,
 
       login: async (email: string, password: string) => {
+        // Clear state before starting
+        set({ isLoading: true, error: null });
+
+        // Set a login timeout to prevent hanging
+        const loginTimeout = setTimeout(() => {
+          console.error("Login timed out");
+          set({
+            error: "Login request timed out. Please try again.",
+            isLoading: false,
+            user: null,
+            isAuthenticated: false,
+          });
+        }, 10000); // 10 second timeout as a fallback safety
+
         try {
-          set({ isLoading: true, error: null });
+          console.log(`Attempting login with email: ${email} to API server`);
 
           // First step: Login to get the token
           const loginResponse = await api.login(email, password);
-          console.log("Login successful, response:", {
-            status: loginResponse.status,
-            data: loginResponse.data ? "Present" : "Missing",
+
+          // Properly type the response
+          interface LoginResponse {
+            status: number;
+            statusText: string;
+            data?: {
+              access_token?: string;
+              user_id?: string;
+              email?: string;
+            };
+          }
+
+          const typedResponse = loginResponse as LoginResponse;
+
+          console.log("Login response received:", {
+            status: typedResponse.status,
+            statusText: typedResponse.statusText,
+            hasData: !!typedResponse.data,
+            accessToken: typedResponse.data?.access_token
+              ? "Present"
+              : "Missing",
             cookies: document.cookie
-              ? document.cookie.substring(0, 40) + "..."
+              ? document.cookie.substring(0, 60) + "..."
               : "None",
           });
 
+          // Clear the timeout since we got a response
+          clearTimeout(loginTimeout);
+
           // Add a small delay to ensure cookies are properly set
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 800));
 
           // Check cookie state after login
           console.log(
             "Cookies after login delay:",
-            document.cookie ? document.cookie.substring(0, 40) + "..." : "None"
+            document.cookie ? document.cookie.substring(0, 60) + "..." : "None"
           );
+
+          // If we don't have an access token in the response or cookies, throw an error
+          if (
+            !typedResponse.data?.access_token &&
+            !document.cookie.includes("access_token") &&
+            !document.cookie.includes("token_debug")
+          ) {
+            throw new Error("No access token received from server");
+          }
 
           try {
             // Second step: Get user data with the token
+            console.log("Fetching user data with token");
             const { data: userData } = await api.getCurrentUser();
             console.log("User data fetched successfully:", userData?.email);
 
@@ -99,14 +157,14 @@ export const useAuthStore = create<AuthState>()(
               isAuthenticated: true,
               isLoading: false,
             });
-          } catch (userError) {
+          } catch (userError: unknown) {
             console.error("Error fetching user data:", userError);
 
             // If we can't get user data, still consider login successful but with limited data
-            if (loginResponse?.data?.user_id) {
+            if (typedResponse.data?.user_id) {
               const partialUserData: User = {
-                id: loginResponse.data.user_id,
-                email: loginResponse.data.email || email,
+                id: typedResponse.data.user_id,
+                email: typedResponse.data.email || email,
                 is_verified: false,
                 roles: [],
               };
@@ -125,16 +183,34 @@ export const useAuthStore = create<AuthState>()(
               throw userError; // Re-throw if we can't even get minimal user data
             }
           }
-        } catch (loginError) {
-          console.error("Login process failed:", loginError);
+        } catch (error: unknown) {
+          // Clear the timeout if there's an error
+          clearTimeout(loginTimeout);
+
+          console.error("Login process failed:", error);
+
+          // Extract a more detailed error message
+          let errorMessage = "Login failed";
+          if (error instanceof Error) {
+            errorMessage = error.message;
+
+            // Check for network errors
+            if (
+              error.message.includes("Network Error") ||
+              error.message.includes("Failed to fetch")
+            ) {
+              errorMessage =
+                "Cannot connect to the server. Is the backend API running?";
+            }
+          }
+
           set({
-            error: extractErrorMessage(loginError),
+            error: errorMessage,
             isLoading: false,
             user: null,
             isAuthenticated: false,
           });
-          // Re-throw the error so the component can catch it
-          throw loginError;
+          throw error;
         }
       },
 
@@ -146,7 +222,7 @@ export const useAuthStore = create<AuthState>()(
           if (data?.redirect_url && typeof window !== "undefined") {
             window.location.href = data.redirect_url;
           }
-        } catch (error: any) {
+        } catch (error: unknown) {
           set({
             error: extractErrorMessage(error),
             isLoading: false,
@@ -165,7 +241,7 @@ export const useAuthStore = create<AuthState>()(
             isAuthenticated: false,
             isLoading: false,
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           set({
             error: extractErrorMessage(error),
             isLoading: false,
@@ -184,6 +260,21 @@ export const useAuthStore = create<AuthState>()(
             isLoading: currentState.isLoading,
           });
           return;
+        }
+
+        // Skip fetching if we already have a valid user with ID
+        if (currentState.isAuthenticated && currentState.user?.id) {
+          const lastFetchTime = parseInt(
+            localStorage.getItem("auth_last_fetch_time") || "0"
+          );
+          const currentTime = Date.now();
+          const MAX_CACHE_AGE = 5 * 60 * 1000; // 5 minutes cache validity
+
+          // If we have a fairly recent user fetch, don't fetch again
+          if (lastFetchTime && currentTime - lastFetchTime < MAX_CACHE_AGE) {
+            console.log("Using cached user data - skipping fetch");
+            return;
+          }
         }
 
         // Check for stored last failure time to prevent excessive retries
@@ -214,6 +305,9 @@ export const useAuthStore = create<AuthState>()(
             // Clear any stored error markers on success
             localStorage.removeItem("auth_last_failure_time");
             localStorage.removeItem("auth_failure_count");
+
+            // Record fetch time for caching
+            localStorage.setItem("auth_last_fetch_time", Date.now().toString());
 
             set({
               user: userData,
@@ -270,6 +364,12 @@ export const useAuthStore = create<AuthState>()(
                 // Clear failure markers on success
                 localStorage.removeItem("auth_last_failure_time");
                 localStorage.removeItem("auth_failure_count");
+
+                // Record fetch time for caching
+                localStorage.setItem(
+                  "auth_last_fetch_time",
+                  Date.now().toString()
+                );
 
                 set({
                   user: userData,

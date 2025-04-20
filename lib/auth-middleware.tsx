@@ -23,14 +23,40 @@ export default function AuthMiddleware({
   const hasFetchedUser = useRef(false);
   const hasRedirected = useRef(false);
   const authFailures = useRef(0);
+  const hasVerifiedSession = useRef(false);
 
   // Check if user has admin role
   const isAdmin = user?.roles?.some((role) => role.name === "admin") || false;
+
+  // Add safety timeout to prevent infinite loading
+  useEffect(() => {
+    let timeoutId: NodeJS.Timeout;
+
+    if (isLoading) {
+      console.log("Setting safety timeout for loading state");
+      timeoutId = setTimeout(() => {
+        console.log(
+          "Safety timeout triggered - forcing loading state to false"
+        );
+        useAuthStore.setState({ isLoading: false });
+        hasFetchedUser.current = true;
+      }, 5000); // 5 second safety timeout
+    }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [isLoading]);
 
   useEffect(() => {
     // Reset tracking refs when authentication state changes
     if (!isLoading) {
       hasRedirected.current = false;
+    }
+
+    // If we're authenticated and have user data, mark session as verified to prevent endless fetching
+    if (isAuthenticated && user && user.id) {
+      hasVerifiedSession.current = true;
     }
 
     // Add some debug logging (only once per state change)
@@ -47,6 +73,7 @@ export default function AuthMiddleware({
       hasFetchedUser: hasFetchedUser.current,
       hasRedirected: hasRedirected.current,
       authFailures: authFailures.current,
+      hasVerifiedSession: hasVerifiedSession.current,
     });
 
     // Limit the number of auth retries to prevent infinite loops
@@ -69,26 +96,34 @@ export default function AuthMiddleware({
     }
 
     // Attempt to fetch user only once if needed and not already loading
-    if (!isLoading && !hasFetchedUser.current) {
-      console.log("Attempting to fetch user data");
-      hasFetchedUser.current = true; // Mark that we've attempted to fetch
+    if (!isLoading && !hasFetchedUser.current && !hasVerifiedSession.current) {
+      // Skip fetching for login and register pages when not authenticated
+      // This allows these pages to render instantly
+      const isAuthPage = pathname === "/login" || pathname === "/register";
+      if (isAuthPage && !isAuthenticated && !requireAuth) {
+        console.log("Skipping user fetch for auth page - not needed yet");
+        hasFetchedUser.current = true;
+      } else {
+        console.log("Attempting to fetch user data");
+        hasFetchedUser.current = true; // Mark that we've attempted to fetch
 
-      // If we already have user data from persistence but need to validate
-      if (isAuthenticated && user) {
-        console.log("User data already exists in store, validating session");
-      }
-
-      fetchUser().catch((error) => {
-        console.error("Failed to fetch user:", error);
-        authFailures.current += 1;
-
-        // Only redirect to login if this is a protected route and we haven't already redirected
-        if (requireAuth && !hasRedirected.current) {
-          console.log("Redirecting to login");
-          hasRedirected.current = true;
-          router.push(`/login?redirect=${encodeURIComponent(pathname)}`);
+        // If we already have user data from persistence but need to validate
+        if (isAuthenticated && user) {
+          console.log("User data already exists in store, validating session");
         }
-      });
+
+        fetchUser().catch((error) => {
+          console.error("Failed to fetch user:", error);
+          authFailures.current += 1;
+
+          // Only redirect to login if this is a protected route and we haven't already redirected
+          if (requireAuth && !hasRedirected.current) {
+            console.log("Redirecting to login");
+            hasRedirected.current = true;
+            router.push(`/login?redirect=${encodeURIComponent(pathname)}`);
+          }
+        });
+      }
 
       return; // Exit early to prevent multiple actions in the same effect cycle
     }
@@ -134,7 +169,7 @@ export default function AuthMiddleware({
     user,
   ]);
 
-  // Reset fetch tracking when component unmounts or key dependencies change
+  // Reset fetch tracking when path changes but PRESERVE verified session status
   useEffect(() => {
     // If we have user data and authentication status changed, reset fetch flag
     if (isAuthenticated && user) {
@@ -142,6 +177,7 @@ export default function AuthMiddleware({
     }
 
     return () => {
+      // Only reset fetch flag, keep session verification status
       hasFetchedUser.current = false;
     };
   }, [pathname, isAuthenticated, user]);
